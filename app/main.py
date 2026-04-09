@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from typing import List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -28,11 +29,11 @@ def create_reading(reading: ReadingCreate, db: Session = Depends(get_db)):
     return db_reading
 
 
-@app.get("/readings", response_model=list[ReadingResponse])
+@app.get("/readings", response_model=List[ReadingResponse])
 def get_readings(
-    meter_id: int | None = Query(None),
-    start_date: str | None = Query(None),
-    end_date: str | None = Query(None),
+    meter_id: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     query = db.query(Reading)
@@ -66,7 +67,7 @@ def delete_reading(reading_id: int, db: Session = Depends(get_db)):
 # --- Simulation Endpoint ---
 
 @app.post("/simulate/{meter_id}")
-def simulate(meter_id: int, body: SimulateRequest | None = None):
+def simulate(meter_id: int, body: Optional[SimulateRequest] = None):
     simulator_path = os.path.join(os.path.dirname(__file__), "..", "simulator", "client.py")
     cmd = [sys.executable, simulator_path, str(meter_id)]
 
