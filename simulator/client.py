@@ -22,18 +22,18 @@ def main():
     parser.add_argument("--end-date", help="End date (YYYY-MM-DD)")
     args = parser.parse_args()
 
-    # Default to 15-day window if no dates provided (caps at ~21,600 records)
+    # Default to 10-day window if no dates provided (~14,400 records)
     start = args.start_date or "2007-01-01"
     if args.end_date:
         end = args.end_date
     else:
-        end_dt = datetime.strptime(start, "%Y-%m-%d") + timedelta(days=15)
+        end_dt = datetime.strptime(start, "%Y-%m-%d") + timedelta(days=10)
         end = end_dt.strftime("%Y-%m-%d")
 
     params = {"start_date": start, "end_date": end}
 
-    print(f"Fetching data from {DATA_INGESTION_URL}/consumption ...")
-    resp = requests.get(f"{DATA_INGESTION_URL}/consumption", params=params, timeout=60)
+    print(f"Fetching data from {DATA_INGESTION_URL}/api/v1/consumption ...")
+    resp = requests.get(f"{DATA_INGESTION_URL}/api/v1/consumption", params=params, timeout=60)
     resp.raise_for_status()
     records = resp.json()
     print(f"Received {len(records)} records")
