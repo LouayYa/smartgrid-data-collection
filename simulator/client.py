@@ -54,7 +54,7 @@ def main():
     records = resp.json()
     print(f"Received {len(records)} records")
 
-    posted = 0
+    payloads = []
     for record in records:
         try:
             timestamp = parse_ingestion_timestamp(record["Date"], record["Time"])
@@ -62,7 +62,7 @@ def main():
             print(f"Skipping malformed record: {e}")
             continue
 
-        payload = {
+        payloads.append({
             "meter_id": args.meter_id,
             "timestamp": timestamp,
             "global_active_power": float(record.get("Global_active_power") or 0),
@@ -70,10 +70,17 @@ def main():
             "sub_metering_1": float(record.get("Sub_metering_1") or 0),
             "sub_metering_2": float(record.get("Sub_metering_2") or 0),
             "sub_metering_3": float(record.get("Sub_metering_3") or 0),
-        }
-        r = requests.post(f"{DATA_COLLECTION_URL}/readings", json=payload, timeout=10)
+        })
+
+    BATCH_SIZE = 1000
+    posted = 0
+    session = requests.Session()
+    for i in range(0, len(payloads), BATCH_SIZE):
+        batch = payloads[i : i + BATCH_SIZE]
+        r = session.post(f"{DATA_COLLECTION_URL}/readings/bulk", json=batch, timeout=60)
         r.raise_for_status()
-        posted += 1
+        posted += len(batch)
+        print(f"Posted {posted}/{len(payloads)}")
 
     print(f"Successfully posted {posted} readings for meter {args.meter_id}")
 

@@ -29,6 +29,14 @@ def create_reading(reading: ReadingCreate, db: Session = Depends(get_db)):
     return db_reading
 
 
+@app.post("/readings/bulk", status_code=201)
+def create_readings_bulk(readings: List[ReadingCreate], db: Session = Depends(get_db)):
+    objects = [Reading(**r.model_dump()) for r in readings]
+    db.bulk_save_objects(objects)
+    db.commit()
+    return {"inserted": len(objects), "status": "stored"}
+
+
 @app.get("/readings", response_model=List[ReadingResponse])
 def get_readings(
     meter_id: Optional[int] = Query(None),
