@@ -16,7 +16,7 @@ if "mysql" in DATABASE_URL:
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    engine = create_engine(DATABASE_URL, **SSL_ARGS)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, **SSL_ARGS)
 
 SessionLocal = sessionmaker(bind=engine)
 

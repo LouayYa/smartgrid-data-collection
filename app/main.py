@@ -83,6 +83,20 @@ def delete_reading(reading_id: int, db: Session = Depends(get_db)):
     return {"reading_id": reading_id, "status": "deleted"}
 
 
+@app.delete("/readings/by-meter/{meter_id}")
+def delete_readings_by_meter(meter_id: int, db: Session = Depends(get_db)):
+    count = db.query(Reading).filter(Reading.meter_id == meter_id).delete()
+    db.commit()
+    return {"meter_id": meter_id, "deleted": count}
+
+
+@app.delete("/readings")
+def delete_all_readings(db: Session = Depends(get_db)):
+    count = db.query(Reading).delete()
+    db.commit()
+    return {"deleted": count}
+
+
 # --- Simulation Endpoint ---
 
 @app.post("/simulate/{meter_id}")
