@@ -1,9 +1,8 @@
 import os
-import subprocess
-import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
+import requests
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -16,6 +15,18 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Data Collection Service", version="1.0.0")
 
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
+SIMULATE_BATCH_SIZE = 5000
+
+
+def _parse_ingestion_timestamp(date_str: str, time_str: str) -> datetime:
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(date_str.strip(), fmt)
+            t = datetime.strptime(time_str.strip(), "%H:%M:%S").time()
+            return datetime.combine(d.date(), t)
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized date: {date_str!r}")
 
 
 # --- CRUD Endpoints ---
@@ -75,30 +86,50 @@ def delete_reading(reading_id: int, db: Session = Depends(get_db)):
 # --- Simulation Endpoint ---
 
 @app.post("/simulate/{meter_id}")
-def simulate(meter_id: int, body: Optional[SimulateRequest] = None):
-    simulator_path = os.path.join(os.path.dirname(__file__), "..", "simulator", "client.py")
-    cmd = [sys.executable, simulator_path, str(meter_id)]
-
-    if body and body.start_date:
-        cmd.extend(["--start-date", body.start_date])
+def simulate(meter_id: int, body: Optional[SimulateRequest] = None, db: Session = Depends(get_db)):
+    start_str = (body.start_date if body and body.start_date else None) or "2007-01-01"
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d")
     if body and body.end_date:
-        cmd.extend(["--end-date", body.end_date])
+        end_dt = datetime.strptime(body.end_date, "%Y-%m-%d")
+    else:
+        end_dt = start_dt + timedelta(days=10)
+
+    params = {
+        "start_date": f"{start_dt.day}/{start_dt.month}/{start_dt.year}",
+        "end_date": f"{end_dt.day}/{end_dt.month}/{end_dt.year}",
+        "limit": 100000,
+    }
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env={**os.environ, "DATA_INGESTION_URL": DATA_INGESTION_URL,
-                 "DATA_COLLECTION_URL": f"http://localhost:{os.getenv('PORT', '8002')}"},
-        )
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Simulator error: {result.stderr}")
-        return {
-            "meter_id": meter_id,
-            "status": "simulation_started",
-            "output": result.stdout,
-        }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Simulation timed out")
+        resp = requests.get(f"{DATA_INGESTION_URL}/api/v1/consumption", params=params, timeout=240)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch from ingestion service: {e}")
+
+    records = resp.json()
+
+    rows = []
+    for record in records:
+        try:
+            ts = _parse_ingestion_timestamp(record["Date"], record["Time"])
+        except (KeyError, ValueError):
+            continue
+        rows.append(Reading(
+            meter_id=meter_id,
+            timestamp=ts,
+            global_active_power=float(record.get("Global_active_power") or 0),
+            voltage=float(record.get("Voltage") or 0),
+            sub_metering_1=float(record.get("Sub_metering_1") or 0),
+            sub_metering_2=float(record.get("Sub_metering_2") or 0),
+            sub_metering_3=float(record.get("Sub_metering_3") or 0),
+        ))
+
+    for i in range(0, len(rows), SIMULATE_BATCH_SIZE):
+        db.bulk_save_objects(rows[i : i + SIMULATE_BATCH_SIZE])
+        db.commit()
+
+    return {
+        "meter_id": meter_id,
+        "status": "simulation_complete",
+        "records_inserted": len(rows),
+    }
