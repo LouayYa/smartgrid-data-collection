@@ -4,9 +4,11 @@
 
 ## Overview
 
-Receives and stores smart meter readings from the Python Client Simulator, exposes a simulation trigger endpoint, and serves collected readings to the Data Analysis Service. Deployed as an Azure App Service with its own dedicated Azure SQL Database.
+One of five independently deployed microservices behind SmartGrid Insights, a system that ingests, stores, and analyzes 260K+ smart meter readings end to end. This service is the write path: it receives readings from the client simulator, exposes a simulation-trigger endpoint that pulls historical consumption data from the Data Ingestion Service, persists it to PostgreSQL, and serves it back out to the Data Analysis Service.
 
-**Stack:** FastAPI · SQLAlchemy · PyMySQL · Pydantic · Azure App Service · GitHub Actions
+Originally deployed on Azure App Service with Azure SQL; the database layer has since been migrated to **PostgreSQL**, and the service carries a **pytest** suite covering its API surface (CRUD on readings, simulation triggering, input validation) against an isolated SQLite test database — no live infrastructure required to run tests locally or in CI.
+
+**Stack:** FastAPI · SQLAlchemy · PostgreSQL (psycopg2) · Pydantic · pytest · GitHub Actions · Azure App Service (deploy-on-demand)
 
 ---
 
@@ -27,7 +29,7 @@ Client Interface
 
 ## API Endpoints
 
-Base URL: `https://<data-collection-app>.azurewebsites.net`
+Base URL: `http://localhost:8000` (local dev — the Azure deployment has been decommissioned; see [CI/CD](#cicd))
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -49,16 +51,36 @@ POST /simulate/3
 
 ## Database Schema
 
-**Table: `readings`** (Azure SQL — Data Collection DB)
+**Table: `readings`** (PostgreSQL)
 
 | Column | Type | Description |
 |---|---|---|
-| `reading_id` | INT PK | Auto-increment |
-| `meter_id` | INT | References a registered meter |
-| `timestamp` | DATETIME | Reading timestamp |
+| `reading_id` | SERIAL PK | Auto-increment |
+| `meter_id` | INTEGER | References a registered meter |
+| `timestamp` | TIMESTAMP | Reading timestamp |
 | `global_active_power` | FLOAT | Total active power (kW) |
 | `voltage` | FLOAT | Voltage (V) |
 | `sub_metering_1/2/3` | FLOAT | Kitchen / Laundry / Water heater (Wh) |
+
+Schema is created automatically on startup via `Base.metadata.create_all()` — no manual migration step needed for this table.
+
+---
+
+## Testing
+
+The service ships with a `pytest` suite in [`tests/`](tests/) covering:
+
+- **CRUD on readings** — creating a reading, filtering by `meter_id`, and the empty-result case for a meter with no data (`tests/test_readings.py`)
+- **Simulation triggering** — mocking the outbound call to the Data Ingestion Service and asserting readings are correctly parsed and persisted, plus input-validation behavior for malformed meter IDs (`tests/test_simulate.py`)
+
+Tests run against an isolated, disposable **SQLite** database (`tests/conftest.py` overrides `DATABASE_URL` before the app is imported), not the real PostgreSQL instance — so they're fast, deterministic, and require no external services or credentials to run.
+
+```bash
+pip install pytest httpx
+pytest tests/ -v
+```
+
+This suite runs automatically as part of CI (see below) on every push to `main`.
 
 ---
 
@@ -73,11 +95,7 @@ pip install -r requirements.txt
 
 Create a `.env` file:
 ```env
-DB_HOST=<your-db-host>
-DB_PORT=3306
-DB_NAME=data_collection_db
-DB_USER=<your-db-user>
-DB_PASSWORD=<your-db-password>
+DATABASE_URL=postgresql://<user>:<password>@<host>:5432/smartgrid_collection
 DATA_INGESTION_URL=https://<data-ingestion-app>.azurewebsites.net
 ```
 
@@ -89,19 +107,11 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## CI/CD — Deployment to Azure App Service
+## CI/CD
 
-The service is deployed to Azure App Service via **GitHub Actions**, configured through **Azure Deployment Center** — no manual workflow setup required.
+**Build & test** run automatically via **GitHub Actions** on every push to `main`: dependencies install into a virtual environment and the `pytest` suite runs against the isolated SQLite test database described above. A failing test blocks the pipeline before any deployment step runs.
 
-**How it was set up:**
-1. In the Azure Portal, navigate to the App Service → **Deployment Center**
-2. Under **Source**, select **GitHub** and authorize Azure to access your account
-3. Select the repository (`smartgrid-data-collection`) and branch (`main`)
-4. Azure automatically generates and commits a GitHub Actions workflow file to `.github/workflows/`
-
-From that point on, every push to `main` triggers the workflow — it builds the Python app and deploys it to the App Service automatically.
-
-App Service environment variables (DB credentials, `DATA_INGESTION_URL`) are configured under **App Service → Settings → Configuration** in the Azure Portal, not committed to the repo.
+**Deploy to Azure App Service** was originally wired through **Azure Deployment Center** (GitHub source → auto-generated workflow), with app settings (`DATABASE_URL`, `DATA_INGESTION_URL`) configured under App Service → Configuration rather than committed to the repo. The live Azure App Service has since been decommissioned to cut hosting costs, so the `deploy` job is kept in [`.github/workflows/`](.github/workflows/) as a reference implementation and only runs on a manual `workflow_dispatch` trigger — it no longer fires on every push.
 
 ---
 
