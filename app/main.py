@@ -66,6 +66,11 @@ def _parse_ingestion_timestamp(date_str: str, time_str: str) -> datetime:
     raise ValueError(f"Unrecognized date: {date_str!r}")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 # --- Write Endpoints (publish to Kafka; app/consumer.py persists) ---
 
 @app.post("/readings", status_code=202)

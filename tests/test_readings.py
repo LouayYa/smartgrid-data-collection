@@ -157,3 +157,9 @@ def test_bulk_returns_503_when_kafka_unavailable(client, fake_publisher):
         "sub_metering_3": 17.0
     }]
     assert client.post("/readings/bulk", json=payload).status_code == 503
+
+
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
