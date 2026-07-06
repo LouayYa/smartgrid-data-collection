@@ -44,6 +44,7 @@ Base URL: `http://localhost:8002` (local dev — the Azure deployment has been d
 | `POST` | `/readings/bulk` | Publish a batch of readings to Kafka (`202 Accepted`) |
 | `GET` | `/readings` | Get readings — optional `meter_id`, `start_date`, `end_date` (`YYYY-MM-DD`, both inclusive) filters |
 | `GET` | `/readings/{id}` | Get a specific reading |
+| `GET` | `/aggregates/daily` | Per-meter daily aggregates precomputed by the Airflow batch pipeline — optional `meter_id`, `start_date`, `end_date` filters |
 | `DELETE` | `/readings/{id}` | Delete a reading |
 | `DELETE` | `/readings/by-meter/{meter_id}` | Delete all readings for a meter |
 | `DELETE` | `/readings` | Delete all readings |

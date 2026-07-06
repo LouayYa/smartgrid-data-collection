@@ -10,8 +10,13 @@ from sqlalchemy.orm import Session
 
 from app.database import engine, get_db, Base
 from app.events import KafkaPublishError, ReadingPublisher, get_publisher
-from app.models import Reading
-from app.schemas import ReadingCreate, ReadingResponse, SimulateRequest
+from app.models import AnalyticsDaily, Reading
+from app.schemas import (
+    DailyAggregateResponse,
+    ReadingCreate,
+    ReadingResponse,
+    SimulateRequest,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -143,6 +148,25 @@ def delete_all_readings(db: Session = Depends(get_db)):
     count = db.query(Reading).delete()
     db.commit()
     return {"deleted": count}
+
+
+# --- Batch Aggregates (written by the Airflow daily_consumption_aggregates DAG) ---
+
+@app.get("/aggregates/daily", response_model=List[DailyAggregateResponse])
+def get_daily_aggregates(
+    meter_id: Optional[int] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    query = db.query(AnalyticsDaily)
+    if meter_id is not None:
+        query = query.filter(AnalyticsDaily.meter_id == meter_id)
+    if start_date:
+        query = query.filter(AnalyticsDaily.day >= _parse_query_date(start_date, "start_date").date())
+    if end_date:
+        query = query.filter(AnalyticsDaily.day <= _parse_query_date(end_date, "end_date").date())
+    return query.order_by(AnalyticsDaily.meter_id, AnalyticsDaily.day).all()
 
 
 # --- Simulation Endpoint ---
