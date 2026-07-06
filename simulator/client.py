@@ -1,17 +1,24 @@
 """
 Python Client Simulator
 
-Fetches consumption records from the Data Ingestion Service
-and POSTs them to the Data Collection Service as meter readings.
+Fetches consumption records from the Data Ingestion Service and streams them
+to the `meter-readings` Kafka topic as meter readings — the same path a real
+smart meter would use. The Data Collection consumer persists them.
+
+Requires KAFKA_BOOTSTRAP_SERVERS to point at the broker (default
+localhost:9094, the host-exposed listener from docker-compose.yml).
 """
 import argparse
-from datetime import datetime, timedelta
+import json
 import os
+from datetime import datetime, timedelta
 
 import requests
+from confluent_kafka import Producer
 
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
-DATA_COLLECTION_URL = os.getenv("DATA_COLLECTION_URL", "http://localhost:8002")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
+READINGS_TOPIC = os.getenv("KAFKA_READINGS_TOPIC", "meter-readings")
 
 
 def parse_ingestion_timestamp(date_str: str, time_str: str) -> str:
@@ -43,8 +50,8 @@ def main():
 
     # Ingestion service expects d/m/yyyy format
     params = {
-        "start_date": start_dt.strftime("%-d/%-m/%Y") if os.name != "nt" else f"{start_dt.day}/{start_dt.month}/{start_dt.year}",
-        "end_date": end_dt.strftime("%-d/%-m/%Y") if os.name != "nt" else f"{end_dt.day}/{end_dt.month}/{end_dt.year}",
+        "start_date": f"{start_dt.day}/{start_dt.month}/{start_dt.year}",
+        "end_date": f"{end_dt.day}/{end_dt.month}/{end_dt.year}",
         "limit": 100000,
     }
 
@@ -72,17 +79,42 @@ def main():
             "sub_metering_3": float(record.get("Sub_metering_3") or 0),
         })
 
-    BATCH_SIZE = 1000
-    posted = 0
-    session = requests.Session()
-    for i in range(0, len(payloads), BATCH_SIZE):
-        batch = payloads[i : i + BATCH_SIZE]
-        r = session.post(f"{DATA_COLLECTION_URL}/readings/bulk", json=batch, timeout=60)
-        r.raise_for_status()
-        posted += len(batch)
-        print(f"Posted {posted}/{len(payloads)}")
+    producer = Producer({
+        "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
+        "acks": "all",
+        "enable.idempotence": True,
+    })
 
-    print(f"Successfully posted {posted} readings for meter {args.meter_id}")
+    delivered = 0
+    failed = 0
+
+    def on_delivery(err, msg):
+        nonlocal delivered, failed
+        if err is None:
+            delivered += 1
+        else:
+            failed += 1
+            print(f"Delivery failed: {err}")
+
+    print(f"Producing {len(payloads)} readings to {READINGS_TOPIC} on {KAFKA_BOOTSTRAP_SERVERS}")
+    for payload in payloads:
+        while True:
+            try:
+                producer.produce(
+                    READINGS_TOPIC,
+                    key=str(args.meter_id),
+                    value=json.dumps(payload),
+                    on_delivery=on_delivery,
+                )
+                break
+            except BufferError:
+                producer.poll(1)
+        producer.poll(0)
+        if delivered and delivered % 5000 == 0:
+            print(f"Delivered {delivered}/{len(payloads)}")
+
+    producer.flush(60)
+    print(f"Done: {delivered} delivered, {failed} failed for meter {args.meter_id}")
 
 
 if __name__ == "__main__":

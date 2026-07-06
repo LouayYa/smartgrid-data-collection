@@ -7,6 +7,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import engine, get_db, Base
+from app.events import KafkaPublishError, ReadingPublisher, get_publisher
 from app.models import Reading
 from app.schemas import ReadingCreate, ReadingResponse, SimulateRequest
 
@@ -15,7 +16,6 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Data Collection Service", version="1.0.0")
 
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
-SIMULATE_BATCH_SIZE = 5000
 
 
 def _parse_query_date(value: str, name: str) -> datetime:
@@ -36,23 +36,30 @@ def _parse_ingestion_timestamp(date_str: str, time_str: str) -> datetime:
     raise ValueError(f"Unrecognized date: {date_str!r}")
 
 
-# --- CRUD Endpoints ---
+# --- Write Endpoints (publish to Kafka; app/consumer.py persists) ---
 
-@app.post("/readings", response_model=ReadingResponse, status_code=201)
-def create_reading(reading: ReadingCreate, db: Session = Depends(get_db)):
-    db_reading = Reading(**reading.model_dump())
-    db.add(db_reading)
-    db.commit()
-    db.refresh(db_reading)
-    return db_reading
+@app.post("/readings", status_code=202)
+def create_reading(
+    reading: ReadingCreate,
+    publisher: ReadingPublisher = Depends(get_publisher),
+):
+    try:
+        publisher.publish([reading])
+    except KafkaPublishError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"accepted": 1, "status": "queued"}
 
 
-@app.post("/readings/bulk", status_code=201)
-def create_readings_bulk(readings: List[ReadingCreate], db: Session = Depends(get_db)):
-    objects = [Reading(**r.model_dump()) for r in readings]
-    db.bulk_save_objects(objects)
-    db.commit()
-    return {"inserted": len(objects), "status": "stored"}
+@app.post("/readings/bulk", status_code=202)
+def create_readings_bulk(
+    readings: List[ReadingCreate],
+    publisher: ReadingPublisher = Depends(get_publisher),
+):
+    try:
+        accepted = publisher.publish(readings)
+    except KafkaPublishError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"accepted": accepted, "status": "queued"}
 
 
 @app.get("/readings", response_model=List[ReadingResponse])
@@ -108,8 +115,12 @@ def delete_all_readings(db: Session = Depends(get_db)):
 
 # --- Simulation Endpoint ---
 
-@app.post("/simulate/{meter_id}")
-def simulate(meter_id: int, body: Optional[SimulateRequest] = None, db: Session = Depends(get_db)):
+@app.post("/simulate/{meter_id}", status_code=202)
+def simulate(
+    meter_id: int,
+    body: Optional[SimulateRequest] = None,
+    publisher: ReadingPublisher = Depends(get_publisher),
+):
     start_str = (body.start_date if body and body.start_date else None) or "2007-01-01"
     start_dt = _parse_query_date(start_str, "start_date")
     if body and body.end_date:
@@ -131,13 +142,13 @@ def simulate(meter_id: int, body: Optional[SimulateRequest] = None, db: Session 
 
     records = resp.json()
 
-    rows = []
+    events = []
     for record in records:
         try:
             ts = _parse_ingestion_timestamp(record["Date"], record["Time"])
         except (KeyError, ValueError):
             continue
-        rows.append(Reading(
+        events.append(ReadingCreate(
             meter_id=meter_id,
             timestamp=ts,
             global_active_power=float(record.get("Global_active_power") or 0),
@@ -147,12 +158,13 @@ def simulate(meter_id: int, body: Optional[SimulateRequest] = None, db: Session 
             sub_metering_3=float(record.get("Sub_metering_3") or 0),
         ))
 
-    for i in range(0, len(rows), SIMULATE_BATCH_SIZE):
-        db.bulk_save_objects(rows[i : i + SIMULATE_BATCH_SIZE])
-        db.commit()
+    try:
+        published = publisher.publish(events)
+    except KafkaPublishError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "meter_id": meter_id,
-        "status": "simulation_complete",
-        "records_inserted": len(rows),
+        "status": "simulation_published",
+        "records_published": published,
     }

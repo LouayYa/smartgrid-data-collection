@@ -4,11 +4,11 @@
 
 ## Overview
 
-One of five independently deployed microservices behind SmartGrid Insights, a system that ingests, stores, and analyzes 260K+ smart meter readings end to end. This service is the write path: it receives readings from the client simulator, exposes a simulation-trigger endpoint that pulls historical consumption data from the Data Ingestion Service, persists it to PostgreSQL, and serves it back out to the Data Analysis Service.
+One of five independently deployed microservices behind SmartGrid Insights, a system that ingests, stores, and analyzes 260K+ smart meter readings end to end. This service owns the write path, which is **event-driven**: every reading — whether it arrives via the REST API, the simulation endpoint, or the standalone simulator client — is published as a JSON event to the **`meter-readings` Kafka topic** (keyed by `meter_id`, so per-meter ordering is preserved). A dedicated consumer worker ([`app/consumer.py`](app/consumer.py)) is the *single* component that persists readings to PostgreSQL: it validates each event against the same Pydantic schema the API uses, writes in batches, and commits Kafka offsets only after the database transaction succeeds (at-least-once delivery).
 
-Originally deployed on Azure App Service with Azure SQL; the database layer has since been migrated to **PostgreSQL**, and the service carries a **pytest** suite covering its API surface (CRUD on readings, simulation triggering, input validation) against an isolated SQLite test database — no live infrastructure required to run tests locally or in CI.
+Originally deployed on Azure App Service with Azure SQL; the database layer has since been migrated to **PostgreSQL**, and the service carries a **pytest** suite covering its API surface and the consumer's message handling against an isolated SQLite test database and a fake publisher — no live infrastructure required to run tests locally or in CI.
 
-**Stack:** FastAPI · SQLAlchemy · PostgreSQL (psycopg2) · Pydantic · pytest · Docker · GitHub Actions · Azure App Service (deploy-on-demand)
+**Stack:** FastAPI · Kafka (confluent-kafka) · SQLAlchemy · PostgreSQL (psycopg2) · Pydantic · pytest · Docker · GitHub Actions · Azure App Service (deploy-on-demand)
 
 ---
 
@@ -17,15 +17,20 @@ Originally deployed on Azure App Service with Azure SQL; the database layer has 
 ```
 Client Interface
       │
-      ├──► POST /simulate/{meter_id} ──► fetches historical data
-      │                                        │
-      │                                        ├── GET /consumption  (Data Ingestion Service)
-      │                                        └── bulk-inserts as readings (this service's DB)
+      ├──► POST /simulate/{meter_id} ── GET /consumption (Data Ingestion Service)
+      │            │
+      │            └──► publishes readings ──► [ meter-readings topic (Kafka) ]
+      │                                                     │
+      │                       app/consumer.py  ◄────────────┘
+      │                       (validates + batch-inserts — the only DB writer)
+      │                              │
+      │                              ▼
+      │                        PostgreSQL (readings)
       │
       └──► Data Analysis Service  ──► queries this service via GET /readings
 ```
 
-A standalone simulator client ([`simulator/client.py`](simulator/client.py)) is also available — it performs the same replay from outside the service by POSTing to `/readings/bulk`.
+`POST /readings` and `POST /readings/bulk` follow the same path: they validate and publish to `meter-readings`, returning `202 Accepted` — the consumer persists asynchronously. A standalone simulator client ([`simulator/client.py`](simulator/client.py)) plays the role of a real smart meter and produces directly to the Kafka topic.
 
 ---
 
@@ -35,14 +40,14 @@ Base URL: `http://localhost:8002` (local dev — the Azure deployment has been d
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/readings` | Store a single reading |
-| `POST` | `/readings/bulk` | Store a batch of readings (used by the standalone simulator client) |
+| `POST` | `/readings` | Publish a single reading to Kafka (`202 Accepted`) |
+| `POST` | `/readings/bulk` | Publish a batch of readings to Kafka (`202 Accepted`) |
 | `GET` | `/readings` | Get readings — optional `meter_id`, `start_date`, `end_date` (`YYYY-MM-DD`, both inclusive) filters |
 | `GET` | `/readings/{id}` | Get a specific reading |
 | `DELETE` | `/readings/{id}` | Delete a reading |
 | `DELETE` | `/readings/by-meter/{meter_id}` | Delete all readings for a meter |
 | `DELETE` | `/readings` | Delete all readings |
-| `POST` | `/simulate/{meter_id}` | Replay historical data from the Data Ingestion Service as readings for this meter — optional `start_date`/`end_date` body fields (defaults to a 10-day window) |
+| `POST` | `/simulate/{meter_id}` | Replay historical data from the Data Ingestion Service as reading events for this meter — optional `start_date`/`end_date` body fields (defaults to a 10-day window). Returns `202` once all events are acknowledged by the broker; the consumer persists them. |
 
 **Example — trigger simulation:**
 ```http
@@ -50,8 +55,10 @@ POST /simulate/3
 { "start_date": "2007-01-01", "end_date": "2007-01-08" }
 ```
 ```json
-{ "meter_id": 3, "status": "simulation_complete", "records_inserted": 10080 }
+{ "meter_id": 3, "status": "simulation_published", "records_published": 10080 }
 ```
+
+If the broker is unreachable or any event fails delivery, write endpoints return `503` — nothing is silently dropped.
 
 ---
 
@@ -76,10 +83,11 @@ Schema is created automatically on startup via `Base.metadata.create_all()` — 
 
 The service ships with a `pytest` suite in [`tests/`](tests/) covering:
 
-- **CRUD on readings** — creating a reading, filtering by `meter_id`, and the empty-result case for a meter with no data (`tests/test_readings.py`)
-- **Simulation triggering** — mocking the outbound call to the Data Ingestion Service and asserting readings are correctly parsed and persisted, plus input-validation behavior for malformed meter IDs (`tests/test_simulate.py`)
+- **Write endpoints** — asserting that `POST /readings` and `/readings/bulk` publish validated events (captured by a fake publisher injected via FastAPI dependency override) rather than writing to the DB, plus input-validation rejections (`tests/test_readings.py`)
+- **Simulation triggering** — mocking the outbound call to the Data Ingestion Service and asserting readings are correctly parsed and published, including malformed-record skipping (`tests/test_simulate.py`)
+- **Consumer message handling** — validating/deserializing Kafka messages (valid, malformed JSON, schema violations) and batch persistence semantics (`tests/test_consumer.py`)
 
-Tests run against an isolated, disposable **SQLite** database (`tests/conftest.py` overrides `DATABASE_URL` before the app is imported), not the real PostgreSQL instance — so they're fast, deterministic, and require no external services or credentials to run.
+Tests run against an isolated, disposable **SQLite** database and an in-memory fake publisher (`tests/conftest.py`), not real PostgreSQL or Kafka — so they're fast, deterministic, and require no external services or credentials to run.
 
 ```bash
 pip install pytest httpx
@@ -103,12 +111,14 @@ Create a `.env` file:
 ```env
 DATABASE_URL=postgresql://<user>:<password>@<host>:5432/smartgrid_collection
 DATA_INGESTION_URL=http://localhost:8001
+KAFKA_BOOTSTRAP_SERVERS=localhost:9094   # host-exposed listener from the umbrella docker-compose
 ```
 Without `DATABASE_URL`, the service falls back to a local SQLite file — handy for a quick look without Postgres.
 
-Run:
+Run the API and the consumer worker (two processes):
 ```bash
 uvicorn app.main:app --reload --port 8002
+python -m app.consumer
 # Docs: http://localhost:8002/docs
 ```
 

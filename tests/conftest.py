@@ -11,6 +11,19 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.database import Base, SessionLocal, get_db, engine
+from app.events import get_publisher
+
+
+class FakePublisher:
+    """In-memory stand-in for the Kafka producer: records what was published."""
+
+    def __init__(self):
+        self.published = []
+
+    def publish(self, readings):
+        items = list(readings)
+        self.published.extend(items)
+        return len(items)
 
 
 @pytest.fixture(scope="function")
@@ -25,13 +38,19 @@ def db():
 
 
 @pytest.fixture(scope="function")
-def client(db):
+def fake_publisher():
+    return FakePublisher()
+
+
+@pytest.fixture(scope="function")
+def client(db, fake_publisher):
     def override_get_db():
         try:
             yield db
         finally:
             pass
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_publisher] = lambda: fake_publisher
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
