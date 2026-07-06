@@ -5,7 +5,8 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Fall back to a local SQLite file so the service can run without any env setup.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data_collection.db")
 
 SSL_ARGS = {}
 if "mysql" in DATABASE_URL:

@@ -18,6 +18,13 @@ DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
 SIMULATE_BATCH_SIZE = 5000
 
 
+def _parse_query_date(value: str, name: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{name} must be in YYYY-MM-DD format")
+
+
 def _parse_ingestion_timestamp(date_str: str, time_str: str) -> datetime:
     for fmt in ("%d/%m/%Y", "%d/%m/%y"):
         try:
@@ -59,9 +66,11 @@ def get_readings(
     if meter_id is not None:
         query = query.filter(Reading.meter_id == meter_id)
     if start_date:
-        query = query.filter(Reading.timestamp >= datetime.strptime(start_date, "%Y-%m-%d"))
+        query = query.filter(Reading.timestamp >= _parse_query_date(start_date, "start_date"))
     if end_date:
-        query = query.filter(Reading.timestamp <= datetime.strptime(end_date, "%Y-%m-%d"))
+        # Compare against the start of the next day so the whole end date is included.
+        end = _parse_query_date(end_date, "end_date") + timedelta(days=1)
+        query = query.filter(Reading.timestamp < end)
     return query.all()
 
 
@@ -102,9 +111,9 @@ def delete_all_readings(db: Session = Depends(get_db)):
 @app.post("/simulate/{meter_id}")
 def simulate(meter_id: int, body: Optional[SimulateRequest] = None, db: Session = Depends(get_db)):
     start_str = (body.start_date if body and body.start_date else None) or "2007-01-01"
-    start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+    start_dt = _parse_query_date(start_str, "start_date")
     if body and body.end_date:
-        end_dt = datetime.strptime(body.end_date, "%Y-%m-%d")
+        end_dt = _parse_query_date(body.end_date, "end_date")
     else:
         end_dt = start_dt + timedelta(days=10)
 
