@@ -8,7 +8,7 @@ One of five independently deployed microservices behind SmartGrid Insights, a sy
 
 Originally deployed on Azure App Service with Azure SQL; the database layer has since been migrated to **PostgreSQL**, and the service carries a **pytest** suite covering its API surface (CRUD on readings, simulation triggering, input validation) against an isolated SQLite test database — no live infrastructure required to run tests locally or in CI.
 
-**Stack:** FastAPI · SQLAlchemy · PostgreSQL (psycopg2) · Pydantic · pytest · GitHub Actions · Azure App Service (deploy-on-demand)
+**Stack:** FastAPI · SQLAlchemy · PostgreSQL (psycopg2) · Pydantic · pytest · Docker · GitHub Actions · Azure App Service (deploy-on-demand)
 
 ---
 
@@ -17,34 +17,40 @@ Originally deployed on Azure App Service with Azure SQL; the database layer has 
 ```
 Client Interface
       │
-      ├──► POST /simulate/{meter_id} ──► spawns Python Simulator
+      ├──► POST /simulate/{meter_id} ──► fetches historical data
       │                                        │
       │                                        ├── GET /consumption  (Data Ingestion Service)
-      │                                        └── POST /readings    (this service)
+      │                                        └── bulk-inserts as readings (this service's DB)
       │
-      └──► Data Analysis Service  ──► queries this service's DB
+      └──► Data Analysis Service  ──► queries this service via GET /readings
 ```
+
+A standalone simulator client ([`simulator/client.py`](simulator/client.py)) is also available — it performs the same replay from outside the service by POSTing to `/readings/bulk`.
 
 ---
 
 ## API Endpoints
 
-Base URL: `http://localhost:8000` (local dev — the Azure deployment has been decommissioned; see [CI/CD](#cicd))
+Base URL: `http://localhost:8002` (local dev — the Azure deployment has been decommissioned; see [CI/CD](#cicd))
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/readings` | Store a reading (called by simulator) |
-| `GET` | `/readings` | Get readings — optional `meter_id`, `start_date`, `end_date` filters |
+| `POST` | `/readings` | Store a single reading |
+| `POST` | `/readings/bulk` | Store a batch of readings (used by the standalone simulator client) |
+| `GET` | `/readings` | Get readings — optional `meter_id`, `start_date`, `end_date` (`YYYY-MM-DD`, both inclusive) filters |
 | `GET` | `/readings/{id}` | Get a specific reading |
 | `DELETE` | `/readings/{id}` | Delete a reading |
-| `POST` | `/simulate/{meter_id}` | Trigger the Python simulator for a meter |
+| `DELETE` | `/readings/by-meter/{meter_id}` | Delete all readings for a meter |
+| `DELETE` | `/readings` | Delete all readings |
+| `POST` | `/simulate/{meter_id}` | Replay historical data from the Data Ingestion Service as readings for this meter — optional `start_date`/`end_date` body fields (defaults to a 10-day window) |
 
 **Example — trigger simulation:**
 ```http
 POST /simulate/3
+{ "start_date": "2007-01-01", "end_date": "2007-01-08" }
 ```
 ```json
-{ "meter_id": 3, "status": "simulation_started", "records": 10080 }
+{ "meter_id": 3, "status": "simulation_complete", "records_inserted": 10080 }
 ```
 
 ---
@@ -96,14 +102,28 @@ pip install -r requirements.txt
 Create a `.env` file:
 ```env
 DATABASE_URL=postgresql://<user>:<password>@<host>:5432/smartgrid_collection
-DATA_INGESTION_URL=https://<data-ingestion-app>.azurewebsites.net
+DATA_INGESTION_URL=http://localhost:8001
 ```
+Without `DATABASE_URL`, the service falls back to a local SQLite file — handy for a quick look without Postgres.
 
 Run:
 ```bash
-uvicorn app.main:app --reload --port 8000
-# Docs: http://localhost:8000/docs
+uvicorn app.main:app --reload --port 8002
+# Docs: http://localhost:8002/docs
 ```
+
+---
+
+## Run with Docker
+
+The repo ships a multi-stage [`Dockerfile`](Dockerfile) (Python 3.12-slim builder + slim runtime, non-root user, uvicorn):
+
+```bash
+docker build -t smartgrid-data-collection .
+docker run -p 8002:8002 --env-file .env smartgrid-data-collection
+```
+
+To run the **entire five-service stack plus a shared PostgreSQL 16 instance** with one command, use the `docker-compose.yml` in the umbrella repo: [SmartGrid-Insights](https://github.com/LouayYa/SmartGrid-Insights).
 
 ---
 
