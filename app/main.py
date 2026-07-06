@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import requests
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database import engine, get_db, Base
@@ -32,6 +33,19 @@ if engine.url.get_backend_name() == "sqlite":
 app = FastAPI(title="Data Collection Service", version="1.0.0")
 
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
+
+# When set, every endpoint except the open paths requires this value in the
+# X-API-Key header. Unset (default) disables auth — local dev and tests.
+API_KEY = os.getenv("SMARTGRID_API_KEY", "")
+OPEN_PATHS = {"/", "/health", "/docs", "/openapi.json"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if API_KEY and request.url.path not in OPEN_PATHS:
+        if request.headers.get("X-API-Key") != API_KEY:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -196,7 +210,12 @@ def simulate(
     }
 
     try:
-        resp = requests.get(f"{DATA_INGESTION_URL}/api/v1/consumption", params=params, timeout=240)
+        resp = requests.get(
+            f"{DATA_INGESTION_URL}/api/v1/consumption",
+            params=params,
+            headers={"X-API-Key": API_KEY},
+            timeout=240,
+        )
         resp.raise_for_status()
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch from ingestion service: {e}")

@@ -19,6 +19,7 @@ from confluent_kafka import Producer
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9094")
 READINGS_TOPIC = os.getenv("KAFKA_READINGS_TOPIC", "meter-readings")
+API_KEY = os.getenv("SMARTGRID_API_KEY", "")
 
 
 def parse_ingestion_timestamp(date_str: str, time_str: str) -> str:
@@ -55,7 +56,12 @@ def main():
     }
 
     print(f"Fetching data from {DATA_INGESTION_URL}/api/v1/consumption with {params}")
-    resp = requests.get(f"{DATA_INGESTION_URL}/api/v1/consumption", params=params, timeout=240)
+    resp = requests.get(
+        f"{DATA_INGESTION_URL}/api/v1/consumption",
+        params=params,
+        headers={"X-API-Key": API_KEY},
+        timeout=240,
+    )
     resp.raise_for_status()
     records = resp.json()
     print(f"Received {len(records)} records")
