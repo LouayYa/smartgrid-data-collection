@@ -1,9 +1,11 @@
+import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import engine, get_db, Base
@@ -11,11 +13,32 @@ from app.events import KafkaPublishError, ReadingPublisher, get_publisher
 from app.models import Reading
 from app.schemas import ReadingCreate, ReadingResponse, SimulateRequest
 
-Base.metadata.create_all(bind=engine)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("collection")
+
+# SQLite (dev/test fallback) gets its schema from the models directly;
+# Postgres schema is managed by Alembic migrations (alembic upgrade head).
+if engine.url.get_backend_name() == "sqlite":
+    Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Data Collection Service", version="1.0.0")
 
 DATA_INGESTION_URL = os.getenv("DATA_INGESTION_URL", "http://localhost:8001")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "%s %s -> %d (%.1f ms)",
+        request.method, request.url.path, response.status_code, elapsed_ms,
+    )
+    return response
 
 
 def _parse_query_date(value: str, name: str) -> datetime:
@@ -26,7 +49,9 @@ def _parse_query_date(value: str, name: str) -> datetime:
 
 
 def _parse_ingestion_timestamp(date_str: str, time_str: str) -> datetime:
-    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+    # ISO first (the ingestion service's canonical format), then the source
+    # dataset's d/m/yyyy and d/m/yy for compatibility.
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
         try:
             d = datetime.strptime(date_str.strip(), fmt)
             t = datetime.strptime(time_str.strip(), "%H:%M:%S").time()
@@ -67,6 +92,8 @@ def get_readings(
     meter_id: Optional[int] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    limit: int = Query(1000, ge=1, le=100000, description="Max records per page."),
+    offset: int = Query(0, ge=0, description="Number of records to skip."),
     db: Session = Depends(get_db),
 ):
     query = db.query(Reading)
@@ -78,7 +105,12 @@ def get_readings(
         # Compare against the start of the next day so the whole end date is included.
         end = _parse_query_date(end_date, "end_date") + timedelta(days=1)
         query = query.filter(Reading.timestamp < end)
-    return query.all()
+    return (
+        query.order_by(Reading.timestamp, Reading.reading_id)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
 
 @app.get("/readings/{reading_id}", response_model=ReadingResponse)
@@ -129,8 +161,8 @@ def simulate(
         end_dt = start_dt + timedelta(days=10)
 
     params = {
-        "start_date": f"{start_dt.day}/{start_dt.month}/{start_dt.year}",
-        "end_date": f"{end_dt.day}/{end_dt.month}/{end_dt.year}",
+        "start_date": start_dt.strftime("%Y-%m-%d"),
+        "end_date": end_dt.strftime("%Y-%m-%d"),
         "limit": 100000,
     }
 

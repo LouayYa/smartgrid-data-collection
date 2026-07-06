@@ -37,7 +37,7 @@ POLL_TIMEOUT_SECONDS = 1.0
 _running = True
 
 
-def _stop(signum, frame):
+def _stop(signum, frame):  # pragma: no cover — signal handler
     global _running
     log.info("Received signal %s, shutting down after current batch", signum)
     _running = False
@@ -66,8 +66,11 @@ def persist_batch(session, rows: List[Reading]) -> int:
     return len(rows)
 
 
-def run():
-    Base.metadata.create_all(bind=engine)
+def run():  # pragma: no cover — infinite poll loop; exercised by the compose e2e flow
+    # SQLite (dev fallback) gets its schema from the models; Postgres schema
+    # is managed by Alembic migrations run by the API service's entrypoint.
+    if engine.url.get_backend_name() == "sqlite":
+        Base.metadata.create_all(bind=engine)
 
     consumer = Consumer({
         "bootstrap.servers": BOOTSTRAP_SERVERS,

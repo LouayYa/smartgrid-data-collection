@@ -75,7 +75,7 @@ If the broker is unreachable or any event fails delivery, write endpoints return
 | `voltage` | FLOAT | Voltage (V) |
 | `sub_metering_1/2/3` | FLOAT | Kitchen / Laundry / Water heater (Wh) |
 
-Schema is created automatically on startup via `Base.metadata.create_all()` — no manual migration step needed for this table.
+Schema is managed by **Alembic migrations** ([`alembic/versions/`](alembic/versions/)) — the container entrypoint runs `alembic upgrade head` before serving. Migration `0002` adds a composite `(meter_id, timestamp)` index for the hot query path (meter + date-range filters). The SQLite dev/test fallback still uses `create_all()` for convenience.
 
 ---
 
@@ -90,7 +90,7 @@ The service ships with a `pytest` suite in [`tests/`](tests/) covering:
 Tests run against an isolated, disposable **SQLite** database and an in-memory fake publisher (`tests/conftest.py`), not real PostgreSQL or Kafka — so they're fast, deterministic, and require no external services or credentials to run.
 
 ```bash
-pip install pytest httpx
+pip install pytest pytest-cov httpx
 pytest tests/ -v
 ```
 

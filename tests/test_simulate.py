@@ -64,3 +64,16 @@ def test_simulate_skips_malformed_records(client, fake_publisher):
 def test_simulate_invalid_meter(client):
     response = client.post("/simulate/not-a-number")
     assert response.status_code == 422
+
+
+def test_simulate_rejects_bad_dates(client):
+    response = client.post("/simulate/1", json={"start_date": "not-a-date"})
+    assert response.status_code == 400
+
+
+def test_simulate_returns_502_when_ingestion_unreachable(client):
+    import requests as requests_lib
+
+    with patch("app.main.requests.get", side_effect=requests_lib.ConnectionError("down")):
+        response = client.post("/simulate/1")
+    assert response.status_code == 502

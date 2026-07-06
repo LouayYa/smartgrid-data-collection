@@ -22,8 +22,8 @@ READINGS_TOPIC = os.getenv("KAFKA_READINGS_TOPIC", "meter-readings")
 
 
 def parse_ingestion_timestamp(date_str: str, time_str: str) -> str:
-    """Convert ingestion service's d/m/yy or d/m/yyyy + HH:MM:SS into ISO format."""
-    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+    """Convert the ingestion service's date + HH:MM:SS into an ISO timestamp."""
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
         try:
             d = datetime.strptime(date_str.strip(), fmt)
             t = datetime.strptime(time_str.strip(), "%H:%M:%S").time()
@@ -48,10 +48,9 @@ def main():
     else:
         end_dt = start_dt + timedelta(days=10)
 
-    # Ingestion service expects d/m/yyyy format
     params = {
-        "start_date": f"{start_dt.day}/{start_dt.month}/{start_dt.year}",
-        "end_date": f"{end_dt.day}/{end_dt.month}/{end_dt.year}",
+        "start_date": start_dt.strftime("%Y-%m-%d"),
+        "end_date": end_dt.strftime("%Y-%m-%d"),
         "limit": 100000,
     }
 
